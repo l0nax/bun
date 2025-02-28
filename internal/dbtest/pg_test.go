@@ -17,6 +17,7 @@ import (
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect/pgdialect"
 	"github.com/uptrace/bun/driver/pgdriver"
+	"github.com/uptrace/bun/schema"
 )
 
 func TestPostgresArray(t *testing.T) {
@@ -25,23 +26,22 @@ func TestPostgresArray(t *testing.T) {
 		Array1 []string  `bun:",array"`
 		Array2 *[]string `bun:",array"`
 		Array3 *[]string `bun:",array"`
+		Array4 []*string `bun:",array"`
 	}
 
 	db := pg(t)
-	defer db.Close()
+	t.Cleanup(func() { db.Close() })
+	mustResetModel(t, ctx, db, (*Model)(nil))
 
-	_, err := db.NewDropTable().Model((*Model)(nil)).IfExists().Exec(ctx)
-	require.NoError(t, err)
-
-	_, err = db.NewCreateTable().Model((*Model)(nil)).Exec(ctx)
-	require.NoError(t, err)
-
+	str1 := "hello"
+	str2 := "world"
 	model1 := &Model{
 		ID:     123,
 		Array1: []string{"one", "two", "three"},
 		Array2: &[]string{"hello", "world"},
+		Array4: []*string{&str1, &str2},
 	}
-	_, err = db.NewInsert().Model(model1).Exec(ctx)
+	_, err := db.NewInsert().Model(model1).Exec(ctx)
 	require.NoError(t, err)
 
 	model2 := new(Model)
@@ -61,11 +61,17 @@ func TestPostgresArray(t *testing.T) {
 		Scan(ctx, pgdialect.Array(&strs))
 	require.NoError(t, err)
 	require.Nil(t, strs)
+
+	err = db.NewSelect().Model((*Model)(nil)).
+		Column("array4").
+		Scan(ctx, pgdialect.Array(&strs))
+	require.NoError(t, err)
+	require.Equal(t, []string{"hello", "world"}, strs)
 }
 
 func TestPostgresArrayQuote(t *testing.T) {
 	db := pg(t)
-	defer db.Close()
+	t.Cleanup(func() { db.Close() })
 
 	wanted := []string{"'", "''", "'''", "\""}
 	var strs []string
@@ -101,16 +107,15 @@ func TestPostgresArrayValuer(t *testing.T) {
 	}
 
 	db := pg(t)
-	defer db.Close()
+	t.Cleanup(func() { db.Close() })
 
-	err := db.ResetModel(ctx, (*Model)(nil))
-	require.NoError(t, err)
+	mustResetModel(t, ctx, db, (*Model)(nil))
 
 	model1 := &Model{
 		ID:    123,
 		Array: []Hash{Hash{}},
 	}
-	_, err = db.NewInsert().Model(model1).Exec(ctx)
+	_, err := db.NewInsert().Model(model1).Exec(ctx)
 	require.NoError(t, err)
 
 	model2 := new(Model)
@@ -146,7 +151,7 @@ func TestPostgresMultiTenant(t *testing.T) {
 	db := pg(t)
 
 	db = db.WithNamedArg("tenant", bun.Safe("public"))
-	_ = db.Table(reflect.TypeOf((*IngredientRecipe)(nil)).Elem())
+	_ = db.Table(reflect.TypeFor[IngredientRecipe]())
 
 	models := []interface{}{
 		(*Recipe)(nil),
@@ -154,11 +159,7 @@ func TestPostgresMultiTenant(t *testing.T) {
 		(*IngredientRecipe)(nil),
 	}
 	for _, model := range models {
-		_, err := db.NewDropTable().Model(model).IfExists().Exec(ctx)
-		require.NoError(t, err)
-
-		_, err = db.NewCreateTable().Model(model).Exec(ctx)
-		require.NoError(t, err)
+		mustResetModel(t, ctx, db, model)
 	}
 
 	models = []interface{}{
@@ -191,9 +192,9 @@ func TestPostgresInsertNoRows(t *testing.T) {
 	}
 
 	db := pg(t)
+	t.Cleanup(func() { db.Close() })
 
-	err := db.ResetModel(ctx, (*User)(nil))
-	require.NoError(t, err)
+	mustResetModel(t, ctx, db, (*User)(nil))
 
 	{
 		res, err := db.NewInsert().
@@ -228,9 +229,9 @@ func TestPostgresInsertNoRowsIdentity(t *testing.T) {
 	}
 
 	db := pg(t)
+	t.Cleanup(func() { db.Close() })
 
-	err := db.ResetModel(ctx, (*User)(nil))
-	require.NoError(t, err)
+	mustResetModel(t, ctx, db, (*User)(nil))
 
 	{
 		res, err := db.NewInsert().
@@ -335,6 +336,7 @@ func TestPostgresTransaction(t *testing.T) {
 
 	_, err = db.NewCreateTable().Conn(tx).Model((*Model)(nil)).Exec(ctx)
 	require.NoError(t, err)
+	mustDropTableOnCleanup(t, ctx, db, (*Model)(nil))
 
 	n, err := db.NewSelect().Conn(tx).Model((*Model)(nil)).Count(ctx)
 	require.NoError(t, err)
@@ -349,18 +351,17 @@ func TestPostgresTransaction(t *testing.T) {
 }
 
 func TestPostgresScanWithoutResult(t *testing.T) {
-	db := pg(t)
-	defer db.Close()
-
 	type Model struct {
 		ID int64 `bun:",pk,autoincrement"`
 	}
 
-	err := db.ResetModel(ctx, (*Model)(nil))
-	require.NoError(t, err)
+	db := pg(t)
+	t.Cleanup(func() { db.Close() })
+
+	mustResetModel(t, ctx, db, (*Model)(nil))
 
 	var num int64
-	_, err = db.NewUpdate().Model(new(Model)).Set("id = NULL").Where("id = 0").Exec(ctx, &num)
+	_, err := db.NewUpdate().Model(new(Model)).Set("id = NULL").Where("id = 0").Exec(ctx, &num)
 	require.Equal(t, sql.ErrNoRows, err)
 }
 
@@ -370,10 +371,9 @@ func TestPostgresIPNet(t *testing.T) {
 	}
 
 	db := pg(t)
-	defer db.Close()
+	t.Cleanup(func() { db.Close() })
 
-	err := db.ResetModel(ctx, (*Model)(nil))
-	require.NoError(t, err)
+	mustResetModel(t, ctx, db, (*Model)(nil))
 
 	_, ipv4Net, err := net.ParseCIDR("192.0.2.1/24")
 	require.NoError(t, err)
@@ -393,12 +393,11 @@ func TestPostgresBytea(t *testing.T) {
 	}
 
 	db := pg(t)
-	defer db.Close()
+	t.Cleanup(func() { db.Close() })
 
-	err := db.ResetModel(ctx, (*Model)(nil))
-	require.NoError(t, err)
+	mustResetModel(t, ctx, db, (*Model)(nil))
 
-	_, err = db.NewInsert().Model(&Model{Bytes: []byte("hello")}).Exec(ctx)
+	_, err := db.NewInsert().Model(&Model{Bytes: []byte("hello")}).Exec(ctx)
 	require.NoError(t, err)
 
 	model := new(Model)
@@ -413,13 +412,12 @@ func TestPostgresByteaArray(t *testing.T) {
 	}
 
 	db := pg(t)
-	defer db.Close()
+	t.Cleanup(func() { db.Close() })
 
-	err := db.ResetModel(ctx, (*Model)(nil))
-	require.NoError(t, err)
+	mustResetModel(t, ctx, db, (*Model)(nil))
 
 	model1 := &Model{BytesSlice: [][]byte{[]byte("hello"), []byte("world")}}
-	_, err = db.NewInsert().Model(model1).Exec(ctx)
+	_, err := db.NewInsert().Model(model1).Exec(ctx)
 	require.NoError(t, err)
 
 	model2 := new(Model)
@@ -430,7 +428,7 @@ func TestPostgresByteaArray(t *testing.T) {
 
 func TestPostgresDate(t *testing.T) {
 	db := pg(t)
-	defer db.Close()
+	t.Cleanup(func() { db.Close() })
 
 	var str string
 	err := db.NewSelect().ColumnExpr("'2021-09-15'::date").Scan(ctx, &str)
@@ -455,7 +453,7 @@ func TestPostgresDate(t *testing.T) {
 
 func TestPostgresTimetz(t *testing.T) {
 	db := pg(t)
-	defer db.Close()
+	t.Cleanup(func() { db.Close() })
 
 	var tm time.Time
 	err := db.NewSelect().ColumnExpr("now()::timetz").Scan(ctx, &tm)
@@ -469,15 +467,13 @@ func TestPostgresTimeArray(t *testing.T) {
 		Array1 []time.Time  `bun:",array"`
 		Array2 *[]time.Time `bun:",array"`
 		Array3 *[]time.Time `bun:",array"`
+		Array4 []*time.Time `bun:",array"`
 	}
+
 	db := pg(t)
-	defer db.Close()
+	t.Cleanup(func() { db.Close() })
 
-	_, err := db.NewDropTable().Model((*Model)(nil)).IfExists().Exec(ctx)
-	require.NoError(t, err)
-
-	_, err = db.NewCreateTable().Model((*Model)(nil)).Exec(ctx)
-	require.NoError(t, err)
+	mustResetModel(t, ctx, db, (*Model)(nil))
 
 	time1 := time.Now()
 	time2 := time.Now().Add(time.Hour)
@@ -487,8 +483,9 @@ func TestPostgresTimeArray(t *testing.T) {
 		ID:     123,
 		Array1: []time.Time{time1, time2, time3},
 		Array2: &[]time.Time{time1, time2, time3},
+		Array4: []*time.Time{&time1, &time2, &time3},
 	}
-	_, err = db.NewInsert().Model(model1).Exec(ctx)
+	_, err := db.NewInsert().Model(model1).Exec(ctx)
 	require.NoError(t, err)
 
 	model2 := new(Model)
@@ -514,6 +511,12 @@ func TestPostgresTimeArray(t *testing.T) {
 		Scan(ctx, pgdialect.Array(&times))
 	require.NoError(t, err)
 	require.Nil(t, times)
+
+	err = db.NewSelect().Model((*Model)(nil)).
+		Column("array4").
+		Scan(ctx, pgdialect.Array(&times))
+	require.NoError(t, err)
+	require.Equal(t, 3, len(model1.Array4))
 }
 
 func TestPostgresOnConflictDoUpdate(t *testing.T) {
@@ -525,14 +528,13 @@ func TestPostgresOnConflictDoUpdate(t *testing.T) {
 	ctx := context.Background()
 
 	db := pg(t)
-	defer db.Close()
+	t.Cleanup(func() { db.Close() })
 
-	err := db.ResetModel(ctx, (*Model)(nil))
-	require.NoError(t, err)
+	mustResetModel(t, ctx, db, (*Model)(nil))
 
 	model := &Model{ID: 1}
 
-	_, err = db.NewInsert().
+	_, err := db.NewInsert().
 		Model(model).
 		On("CONFLICT (id) DO UPDATE").
 		Set("updated_at = now()").
@@ -562,14 +564,13 @@ func TestPostgresOnConflictDoUpdateIdentity(t *testing.T) {
 	ctx := context.Background()
 
 	db := pg(t)
-	defer db.Close()
+	t.Cleanup(func() { db.Close() })
 
-	err := db.ResetModel(ctx, (*Model)(nil))
-	require.NoError(t, err)
+	mustResetModel(t, ctx, db, (*Model)(nil))
 
 	model := &Model{ID: 1}
 
-	_, err = db.NewInsert().
+	_, err := db.NewInsert().
 		Model(model).
 		On("CONFLICT (id) DO UPDATE").
 		Set("updated_at = now()").
@@ -594,7 +595,7 @@ func TestPostgresCopyFromCopyTo(t *testing.T) {
 	ctx := context.Background()
 
 	db := pg(t)
-	defer db.Close()
+	t.Cleanup(func() { db.Close() })
 
 	conn, err := db.Conn(ctx)
 	require.NoError(t, err)
@@ -689,13 +690,12 @@ func TestPostgresUUID(t *testing.T) {
 	ctx := context.Background()
 
 	db := pg(t)
-	defer db.Close()
+	t.Cleanup(func() { db.Close() })
 
 	_, err := db.Exec(`CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`)
 	require.NoError(t, err)
 
-	err = db.ResetModel(ctx, (*Model)(nil))
-	require.NoError(t, err)
+	mustResetModel(t, ctx, db, (*Model)(nil))
 
 	model := new(Model)
 	_, err = db.NewInsert().Model(model).Exec(ctx)
@@ -712,16 +712,11 @@ func TestPostgresHStore(t *testing.T) {
 	}
 
 	db := pg(t)
-	defer db.Close()
+	t.Cleanup(func() { db.Close() })
 
 	_, err := db.Exec(`CREATE EXTENSION IF NOT EXISTS HSTORE;`)
 	require.NoError(t, err)
-
-	_, err = db.NewDropTable().Model((*Model)(nil)).IfExists().Exec(ctx)
-	require.NoError(t, err)
-
-	_, err = db.NewCreateTable().Model((*Model)(nil)).Exec(ctx)
-	require.NoError(t, err)
+	mustResetModel(t, ctx, db, (*Model)(nil))
 
 	model1 := &Model{
 		ID:     123,
@@ -760,12 +755,28 @@ func TestPostgresHStore(t *testing.T) {
 
 func TestPostgresHStoreQuote(t *testing.T) {
 	db := pg(t)
-	defer db.Close()
+	t.Cleanup(func() { db.Close() })
 
 	_, err := db.Exec(`CREATE EXTENSION IF NOT EXISTS HSTORE;`)
 	require.NoError(t, err)
 
 	wanted := map[string]string{"'": "'", "''": "''", "'''": "'''", "\"": "\""}
+	m := make(map[string]string)
+	err = db.NewSelect().
+		ColumnExpr("?::hstore", pgdialect.HStore(wanted)).
+		Scan(ctx, pgdialect.HStore(&m))
+	require.NoError(t, err)
+	require.Equal(t, wanted, m)
+}
+
+func TestPostgresHStoreEmpty(t *testing.T) {
+	db := pg(t)
+	t.Cleanup(func() { db.Close() })
+
+	_, err := db.Exec(`CREATE EXTENSION IF NOT EXISTS HSTORE;`)
+	require.NoError(t, err)
+
+	wanted := map[string]string{}
 	m := make(map[string]string)
 	err = db.NewSelect().
 		ColumnExpr("?::hstore", pgdialect.HStore(wanted)).
@@ -784,16 +795,15 @@ func TestPostgresSkipupdateField(t *testing.T) {
 	ctx := context.Background()
 
 	db := pg(t)
-	defer db.Close()
+	t.Cleanup(func() { db.Close() })
 
-	err := db.ResetModel(ctx, (*Model)(nil))
-	require.NoError(t, err)
+	mustResetModel(t, ctx, db, (*Model)(nil))
 
 	createdAt := time.Now().Truncate(time.Minute).UTC()
 
 	model := &Model{ID: 1, Name: "foo", CreatedAt: createdAt}
 
-	_, err = db.NewInsert().Model(model).Exec(ctx)
+	_, err := db.NewInsert().Model(model).Exec(ctx)
 	require.NoError(t, err)
 	require.NotZero(t, model.CreatedAt)
 
@@ -850,16 +860,121 @@ func TestPostgresCustomTypeBytes(t *testing.T) {
 	ctx := context.Background()
 
 	db := pg(t)
-	defer db.Close()
+	t.Cleanup(func() { db.Close() })
 
-	err := db.ResetModel(ctx, (*Model)(nil))
-	require.NoError(t, err)
+	mustResetModel(t, ctx, db, (*Model)(nil))
 
 	in := &Model{Data: []*Issue722{{V: []byte("hello")}}}
-	_, err = db.NewInsert().Model(in).Exec(ctx)
+	_, err := db.NewInsert().Model(in).Exec(ctx)
 	require.NoError(t, err)
 
 	out := new(Model)
 	err = db.NewSelect().Model(out).Scan(ctx)
 	require.NoError(t, err)
+}
+
+func TestPostgresMultiRange(t *testing.T) {
+	type Model struct {
+		ID    int64                           `bun:",pk,autoincrement"`
+		Value pgdialect.MultiRange[time.Time] `bun:",multirange,type:tstzmultirange"`
+	}
+
+	ctx := context.Background()
+
+	db := pg(t)
+	t.Cleanup(func() { db.Close() })
+
+	mustResetModel(t, ctx, db, (*Model)(nil))
+
+	r1 := pgdialect.NewRange(time.Unix(1000, 0), time.Unix(2000, 0))
+	r2 := pgdialect.NewRange(time.Unix(5000, 0), time.Unix(6000, 0))
+	in := &Model{Value: pgdialect.MultiRange[time.Time]{r1, r2}}
+	_, err := db.NewInsert().Model(in).Exec(ctx)
+	require.NoError(t, err)
+
+	out := new(Model)
+	err = db.NewSelect().Model(out).Scan(ctx)
+	require.NoError(t, err)
+}
+
+type UserID struct {
+	ID string
+}
+
+func (u UserID) AppendQuery(fmter schema.Formatter, b []byte) ([]byte, error) {
+	v := []byte(`"` + u.ID + `"`)
+	return append(b, v...), nil
+}
+
+var _ schema.QueryAppender = (*UserID)(nil)
+
+func (r *UserID) Scan(anySrc any) (err error) {
+	src, ok := anySrc.([]byte)
+	if !ok {
+		return fmt.Errorf("pgdialect: Range can't scan %T", anySrc)
+	}
+
+	r.ID = string(src)
+	return nil
+}
+
+var _ sql.Scanner = (*UserID)(nil)
+
+func TestPostgresJSONB(t *testing.T) {
+	type Item struct {
+		Name string `json:"name"`
+	}
+	type Model struct {
+		ID        int64    `bun:",pk,autoincrement"`
+		Item      Item     `bun:",type:jsonb"`
+		ItemPtr   *Item    `bun:",type:jsonb"`
+		Items     []Item   `bun:",type:jsonb"`
+		ItemsP    []*Item  `bun:",type:jsonb"`
+		ItemsNull []*Item  `bun:",type:jsonb"`
+		TextItemA []UserID `bun:"type:text[]"`
+	}
+
+	db := pg(t)
+	t.Cleanup(func() { db.Close() })
+	mustResetModel(t, ctx, db, (*Model)(nil))
+
+	item1 := Item{Name: "one"}
+	item2 := Item{Name: "two"}
+	uid1 := UserID{ID: "1"}
+	uid2 := UserID{ID: "2"}
+	model1 := &Model{
+		ID:        123,
+		Item:      item1,
+		ItemPtr:   &item2,
+		Items:     []Item{item1, item2},
+		ItemsP:    []*Item{&item1, &item2},
+		ItemsNull: nil,
+		TextItemA: []UserID{uid1, uid2},
+	}
+	_, err := db.NewInsert().Model(model1).Exec(ctx)
+	require.NoError(t, err)
+
+	model2 := new(Model)
+	err = db.NewSelect().Model(model2).Scan(ctx)
+	require.NoError(t, err)
+	require.Equal(t, model1, model2)
+
+	var items []Item
+	err = db.NewSelect().Model((*Model)(nil)).
+		Column("items").
+		Scan(ctx, pgdialect.Array(&items))
+	require.NoError(t, err)
+	require.Equal(t, []Item{item1, item2}, items)
+
+	err = db.NewSelect().Model((*Model)(nil)).
+		Column("itemsp").
+		Scan(ctx, pgdialect.Array(&items))
+	require.NoError(t, err)
+	require.Equal(t, []Item{item1, item2}, items)
+
+	err = db.NewSelect().Model((*Model)(nil)).
+		Column("items_null").
+		Scan(ctx, pgdialect.Array(&items))
+	require.NoError(t, err)
+	require.Equal(t, []Item{}, items)
 }

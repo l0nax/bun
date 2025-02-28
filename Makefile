@@ -6,17 +6,16 @@ test:
 	  echo "go test in $${dir}"; \
 	  (cd "$${dir}" && \
 	    go test && \
-	    env GOOS=linux GOARCH=386 go test && \
+	    env GOOS=linux GOARCH=386 TZ= go test && \
 	    go vet); \
 	done
 
 go_mod_tidy:
-	go get -u && go mod tidy -go=1.18
 	set -e; for dir in $(ALL_GO_MOD_DIRS); do \
 	  echo "go mod tidy in $${dir}"; \
 	  (cd "$${dir}" && \
 	    go get -u ./... && \
-	    go mod tidy -go=1.18); \
+	    go mod tidy); \
 	done
 
 fmt:

@@ -10,31 +10,24 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/metric/global"
-	"go.opentelemetry.io/otel/metric/instrument"
-	semconv "go.opentelemetry.io/otel/semconv/v1.12.0"
+	"go.opentelemetry.io/otel/metric"
+	semconv "go.opentelemetry.io/otel/semconv/v1.20.0"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect"
+	"github.com/uptrace/bun/internal"
 	"github.com/uptrace/bun/schema"
 	"github.com/uptrace/opentelemetry-go-extra/otelsql"
 )
 
-var (
-	tracer = otel.Tracer("github.com/uptrace/bun")
-	meter  = global.Meter("github.com/uptrace/bun")
-
-	queryHistogram, _ = meter.Int64Histogram(
-		"go.sql.query_timing",
-		instrument.WithDescription("Timing of processed queries"),
-		instrument.WithUnit("milliseconds"),
-	)
-)
-
 type QueryHook struct {
-	attrs         []attribute.KeyValue
-	formatQueries bool
+	attrs             []attribute.KeyValue
+	formatQueries     bool
+	tracer            trace.Tracer
+	meter             metric.Meter
+	queryHistogram    metric.Int64Histogram
+	spanNameFormatter func(*bun.QueryEvent) string
 }
 
 var _ bun.QueryHook = (*QueryHook)(nil)
@@ -44,6 +37,17 @@ func NewQueryHook(opts ...Option) *QueryHook {
 	for _, opt := range opts {
 		opt(h)
 	}
+	if h.tracer == nil {
+		h.tracer = otel.Tracer("github.com/uptrace/bun")
+	}
+	if h.meter == nil {
+		h.meter = otel.Meter("github.com/uptrace/bun")
+	}
+	h.queryHistogram, _ = h.meter.Int64Histogram(
+		"go.sql.query_timing",
+		metric.WithDescription("Timing of processed queries"),
+		metric.WithUnit("milliseconds"),
+	)
 	return h
 }
 
@@ -58,7 +62,7 @@ func (h *QueryHook) Init(db *bun.DB) {
 }
 
 func (h *QueryHook) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
-	ctx, _ = tracer.Start(ctx, "", trace.WithSpanKind(trace.SpanKindClient))
+	ctx, _ = h.tracer.Start(ctx, "", trace.WithSpanKind(trace.SpanKindClient))
 	return ctx
 }
 
@@ -75,14 +79,19 @@ func (h *QueryHook) AfterQuery(ctx context.Context, event *bun.QueryEvent) {
 		}
 	}
 
-	queryHistogram.Record(ctx, time.Since(event.StartTime).Milliseconds(), labels...)
+	dur := time.Since(event.StartTime)
+	h.queryHistogram.Record(ctx, dur.Milliseconds(), metric.WithAttributes(labels...))
 
 	span := trace.SpanFromContext(ctx)
 	if !span.IsRecording() {
 		return
 	}
 
-	span.SetName(operation)
+	name := operation
+	if h.spanNameFormatter != nil {
+		name = h.spanNameFormatter(event)
+	}
+	span.SetName(name)
 	defer span.End()
 
 	query := h.eventQuery(event)
@@ -102,9 +111,8 @@ func (h *QueryHook) AfterQuery(ctx context.Context, event *bun.QueryEvent) {
 		attrs = append(attrs, sys)
 	}
 	if event.Result != nil {
-		if n, _ := event.Result.RowsAffected(); n > 0 {
-			attrs = append(attrs, attribute.Int64("db.rows_affected", n))
-		}
+		rows, _ := event.Result.RowsAffected()
+		attrs = append(attrs, attribute.Int64("db.rows_affected", rows))
 	}
 
 	switch event.Err {
@@ -166,7 +174,7 @@ func (h *QueryHook) eventQuery(event *bun.QueryEvent) string {
 func unformattedQuery(event *bun.QueryEvent) string {
 	if event.IQuery != nil {
 		if b, err := event.IQuery.AppendQuery(schema.NewNopFormatter(), nil); err == nil {
-			return bytesToString(b)
+			return internal.String(b)
 		}
 	}
 	return string(event.QueryTemplate)
